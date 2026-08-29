@@ -143,7 +143,10 @@ all available commands.
   Also sends a joining request message to all users.
 - `/promote roomname [user1] [...] [usern]` Promote room member(s) to room admins of `roomname`.
   Room admins can invite and kick non-admin users to/from the room.
-- `/kick roomname [user1] [...] [usern]` As a room admin, remove non-admin user(s). As a room creator, remove any room member.
+- `/kick roomname [user1] [...] [usern]` As a room admin, remove non-admin user(s).
+  As a room creator, remove any room member.
+- `/closeroom roomname` As the room creator, closes the room. Asks for a confirmation, so need to send
+  this message twice.
 - '/rooms' Lists all available rooms, room creators, and room admins
 - '/users [room]' List all users. If optional room argument is provided, lists
   all users in that room. You must be a member of that room to list the
