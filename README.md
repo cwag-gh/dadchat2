@@ -3,9 +3,9 @@
 A fun experiment in learning about sockets.
 
 
-# DadChat protocol v2
+## DadChat protocol v2
 
-## Message framing
+### Message framing
 
 One message is encoded as:
 
@@ -25,7 +25,7 @@ message (STX). Similarly, any bytes after ETX that are not STX are
 just discarded.
 
 
-## Server connection
+### Server connection
 
 Server awaits connection on port 12347.
 
@@ -49,7 +49,7 @@ If the first message does not meet these requirements, the server
 will send an error message then close the connection.
 
 
-## Server messages
+### Server messages
 
 Payloads from the server to the client are of the form:
 
@@ -90,7 +90,7 @@ is a private message from user `zeke` to the client.
 
 is a private message from the plugin `*ScrabBot*` to you.
 
-## Client messages
+### Client messages
 
 Client messages start with an optional target, and then send the 
 message content:
@@ -126,21 +126,25 @@ is a message to the room `#thekitchen`. This will only broadcast to
 is a command message, in this case asking to list
 all available commands.
 
-## Commands
+### Commands
 
 - `/help` lists all available commands
 - `/quit` leaves the server gracefully
 - `/join roomname` Joins a room that must exist. Leading `#` character is optional.
-- `/newroom roomname [user1] [user2]` Creates a new private room with the given name.
-  Leading `#` character is optional. Roomname must be 14 bytes encoded or fewer.
-  Users listed are automatically allowed into the room as non-admins, notified, but
+- `/newroom roomname [user1] [...] [usern]` Creates a new private room with the given name.
+  Leading `#` character is optional. `roomname` must be 14 bytes encoded or fewer.
+  Users listed are notified, automatically allowed into the room as non-admins, but
   not auto-joined. You (the room creator) are auto-joined to this room.
-- `/pubroom` Creates a new public room. Any user can join with `/join`.
-- `/join`
-- `/invite` 
-- `/inviteadmin` Invite a user with the ability to invite and kick other users out of that room.
-- `/kick` Removes a non-admin user. Only a room creator can kick an admin.
-- '/rooms' Lists all available rooms and who created them
+- `/pubroom roomname [user1] [...] [usern]` Creates a new public room. Any user can join with `/join`.
+  Listed users are sent an invite request message.
+- `/join` Joins the conversation for a room. If you already allowed as part of the room,
+  you join immediately. If not, a request is sent to all of the admins of a room.
+- `/invite roomname [user1] [...] [usern]` Add users to the allowed list of the room.
+  Also sends a joining request message to all users.
+- `/promote roomname [user1] [...] [usern]` Promote room member(s) to room admins of `roomname`.
+  Room admins can invite and kick non-admin users to/from the room.
+- `/kick roomname [user1] [...] [usern]` As a room admin, remove non-admin user(s). As a room creator, remove any room member.
+- '/rooms' Lists all available rooms, room creators, and room admins
 - '/users [room]' List all users. If optional room argument is provided, lists
   all users in that room. You must be a member of that room to list the
   users in that room.
