@@ -9,7 +9,7 @@ A fun experiment in learning about sockets.
 
 One message is encoded as:
 
-    [STX][payload bytes][ETX]
+    STX|payload bytes|ETX
 
 where:
 
@@ -53,24 +53,24 @@ will send an error message then close the connection.
 
 Payloads from the server to the client are of the form:
 
-    [target_name][space][from_username][colon][space][message]
+    target_name|space|from_username|colon|space|message
 
 where:
 
-- `[target_name]` is either `PRIVATE`, which means the message was sent
-  directly to you from someone, or `#[roomname]` where `[roomname]` is
+- `target_name` is either `PRIVATE`, which means the message was sent
+  directly to you from someone, or `#roomname` where `roomname` is
   the name of a room
   - `#general` is the name of the main room
-  - `[target_name]` is limited to 15 bytes (meaning, room names are
-  limited to 14 bytes)
-- `[space]` and `[colon]` are just a single space " " and colon ":"
+  - `target_name` is limited to 15 encoded bytes (meaning, room names are
+    limited to 14 bytes)
+- `space` and `colon` are just a single space " " and colon ":"
   character respectively
-- `[from_username]` is the username of the person who sent the message
-  - usernames that are bracketed by the `*` character are plugins or
-    bots, like `*ScrabBot*`
+- `from_username` is the username of the person who sent the message
+  - usernames that are bracketed by the `*` character are plugins, like
+    `*ScrabChat*`
   - Messages from the server come from `*DadServer*`
-  - `[from_username]` is limited to 14 bytes, which means that
-  plugin names are limited to 12 bytes
+  - `from_username` is limited to 14 bytes, which means that
+    plugin names are limited to 12 bytes
 - Both usernames and plugin names will never include whitespace
 - Thus, all header information (everything but the message) will take
   a maximum of 32 bytes. This leaves 1022 - 32 = 990 bytes for a
@@ -95,21 +95,53 @@ is a private message from the plugin `*ScrabBot*` to you.
 Client messages start with an optional target, and then send the 
 message content:
 
-    [[target][space]][contents]
+    [target|space]|contents
 
 where:
 
-- `[target]` is either of the form `#[roomname]` where the client is
-  sending a message to a room, `:[username]` where the client is
-  sending a private message to a user, or `/[command]` where the client
+- `target` is either of the form `#roomname` where the client is
+  sending a message to a room, `:username` where the client is
+  sending a private message to a user, or `/command` where the client
   is requesting a command action from the server
-- `[contents]` is limited to 990 encoded bytes
+- You can only send messages to rooms you are a member of.
+- `contents` is limited to 990 encoded bytes
+
+Examples:
+
+    Hi everyone!
+
+is a message to `#general`.
+
+    :zeke What's up?
+
+is a message directly to user `zeke`.
+
+    #thekitchen What's cooking?
+
+is a message to the room `#thekitchen`. This will only broadcast to 
+`#thekitchen` if you are a member of `#thekitchen`.
+
+    /help
+
+is a command message, in this case asking to list
+all available commands.
 
 ## Commands
 
 - `/help` lists all available commands
 - `/quit` leaves the server gracefully
-- `/join [roomname]` Joins a room that must exist. Leading `#` character is optional.
-- `/createroom [roomname]` Creates a new room with the given name.
+- `/join roomname` Joins a room that must exist. Leading `#` character is optional.
+- `/newroom roomname [user1] [user2]` Creates a new private room with the given name.
   Leading `#` character is optional. Roomname must be 14 bytes encoded or fewer.
+  Users listed are automatically allowed into the room as non-admins, notified, but
+  not auto-joined. You (the room creator) are auto-joined to this room.
+- `/pubroom` Creates a new public room. Any user can join with `/join`.
+- `/join`
+- `/invite` 
+- `/inviteadmin` Invite a user with the ability to invite and kick other users out of that room.
+- `/kick` Removes a non-admin user. Only a room creator can kick an admin.
+- '/rooms' Lists all available rooms and who created them
+- '/users [room]' List all users. If optional room argument is provided, lists
+  all users in that room. You must be a member of that room to list the
+  users in that room.
 
