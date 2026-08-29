@@ -35,10 +35,10 @@ as the first message. Their actual username will be the following:
     first_msg.decode('utf-8', errors='replace')
              .strip()
              .replace_any('/*#: \t\r\n', '')
+             .truncate_to_encoded_bytes(14)
              .strip()
 
-and then reduced to fit into 14 bytes when encoded. Note that no
-whitespace is allowed in a username.
+Note that no whitespace is allowed in a username.
 
 Also:
 - Usernames must be at least 3 characters long
