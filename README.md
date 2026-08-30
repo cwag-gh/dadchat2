@@ -147,7 +147,7 @@ all available commands.
   As a room creator, remove any room member.
 - `/closeroom roomname` As the room creator, closes the room. Asks for a confirmation, so need to send
   this message twice.
-- '/rooms' Lists all available rooms, room creators, and room admins
-- '/users [room]' List all users. If optional room argument is provided, lists
+- `/rooms` Lists all available rooms, room creators, and room admins
+- `/users [room]` List all users. If optional room argument is provided, lists
   all users in that room. You must be a member of that room to list the
   users in that room.
