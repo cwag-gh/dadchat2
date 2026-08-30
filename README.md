@@ -32,11 +32,10 @@ Server awaits connection on port 12347.
 Upon a client connect, the client is expected to send their username
 as the first message. Their actual username will be the following:
 
-    first_msg.decode('utf-8', errors='replace')
+    first_msg.decode('utf-8', errors='ignore')
              .strip()
              .replace_any('/*#: \t\r\n', '')
              .truncate_to_encoded_bytes(14)
-             .strip()
 
 Note that no whitespace is allowed in a username.
 
@@ -44,6 +43,7 @@ Also:
 - Usernames must be at least 3 characters long
 - username.lower() must not be any of the following:
   `private`, `general`, `dadserver`
+- Usernames must include at least one letter
 
 If the first message does not meet these requirements, the server
 will send an error message then close the connection.
@@ -92,7 +92,7 @@ is a private message from the plugin `*ScrabBot*` to you.
 
 ### Client messages
 
-Client messages start with an optional target, and then send the 
+Client messages start with an optional target, and then send the
 message content:
 
     [target|space]|contents
@@ -118,7 +118,7 @@ is a message directly to user `zeke`.
 
     #thekitchen What's cooking?
 
-is a message to the room `#thekitchen`. This will only broadcast to 
+is a message to the room `#thekitchen`. This will only broadcast to
 `#thekitchen` if you are a member of `#thekitchen`.
 
     /help
@@ -151,4 +151,3 @@ all available commands.
 - '/users [room]' List all users. If optional room argument is provided, lists
   all users in that room. You must be a member of that room to list the
   users in that room.
-
