@@ -30,23 +30,20 @@ just discarded.
 Server awaits connection on port 12347.
 
 Upon a client connect, the client is expected to send their username
-as the first message. Their actual username will be the following:
+as the first message. A username is valid only if all of the
+following are true:
 
-    first_msg.decode('utf-8', errors='ignore')
-             .strip()
-             .replace_any('/*#: \t\r\n', '')
-             .truncate_to_encoded_bytes(14)
-
-Note that no whitespace is allowed in a username.
-
-Also:
-- Usernames must be at least 3 characters long
-- username.lower() must not be any of the following:
+- It has no leading or trailing whitespace
+- It contains none of the following characters (note this includes
+  all whitespace): `/` `*` `#` `:` space, tab, CR, LF
+- It is at most 14 bytes when encoded as UTF-8
+- It is at least 3 characters long
+- It includes at least one letter
+- username.lower() is not any of the following reserved words:
   `private`, `general`, `dadserver`
-- Usernames must include at least one letter
 
-If the first message does not meet these requirements, the server
-will send an error message then close the connection.
+If the first message is not a valid username, the server will send an
+error message then close the connection.
 
 
 ### Server messages
@@ -103,8 +100,13 @@ where:
   sending a message to a room, `:username` where the client is
   sending a private message to a user, or `/command` where the client
   is requesting a command action from the server
-- You can only send messages to rooms you are a member of.
-- `contents` is limited to 990 encoded bytes
+- You can send messages to any room you are allowed in. For a public
+  room, this means any user not banned from it. for a private room,
+  this is any user on its allowed list. You do not need to have joined
+  the room to post to it (but only users who have joined receive its
+  messages).
+- `contents` is truncated to 990 encoded bytes, so that the server can
+  add 32 bytes of header information when passing it around.
 
 Examples:
 
@@ -119,7 +121,7 @@ is a message directly to user `zeke`.
     #thekitchen What's cooking?
 
 is a message to the room `#thekitchen`. This will only broadcast to
-`#thekitchen` if you are a member of `#thekitchen`.
+`#thekitchen` if you are allowed in `#thekitchen`.
 
     /help
 

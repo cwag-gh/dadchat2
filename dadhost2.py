@@ -26,20 +26,38 @@
 # - Two threads really can be running at the same time. Which means
 #   shared resources need to somehow be protected so that only one can
 #   access at one point in time. For us, these resources are the
-#   client list and the room list. We don't want to check
+#   client list and the room list. We don't want to (for example) check
 #   to see if a username is available, notice that it is, then assign
 #   it; but between the check and assignment, another client thread
 #   was doing the same check, and we end up with two client with the
 #   same username. For situations like this, we use a lock (mutex).
 #   This can be surprisingly tricky to get right!
 #
+# - These concerns can interact, leading to confusing responsibility
+#   as to where and when we actually kill clients and remove them from
+#   the shared state. The way we navigate this complexity is by
+#   following the idea that each client has a single "owner": its own
+#   reader thread. Only that thread ever removes the client from the
+#   shared state (its one cleanup path, in a finally block). Any other
+#   thread that wants a client gone just calls client.kill(), which
+#   closes the socket; the owner thread then wakes up and cleans
+#   up. This avoids tricky lock-ordering problems (deadlocks) and
+#   recursive announcements.
+#
 # TODO:
 # - add ping/pong keepalive
 # - add message rate limiting
 
+import logging
 import threading
 import queue
+import select
+import signal
 import socket
+import time
+
+# Use logging instead of print to avoid message interleaving from multiple threads
+log = logging.getLogger(__name__)
 
 HOST = '0.0.0.0'
 PORT = 12347
@@ -48,6 +66,7 @@ MSG_START = b'\x02'
 MSG_END   = b'\x03'
 MAX_LEN = 1024
 BACKLOG = 32
+MAX_CLIENTS = 32
 HANDSHAKE_TIMEOUT_S = 10
 IDLE_TIMEOUT_S = 15*60
 SERVER_USER = '*DadServer*'
@@ -56,6 +75,9 @@ DEFAULT_ROOM = 'general'
 DIRECT_PREFIX = 'PRIVATE'
 
 
+class ChatError(RuntimeError):
+    """A client request that is not allowed. """
+
 
 class MessageParser:
     """Convert byte stream into a series of messages."""
@@ -63,12 +85,12 @@ class MessageParser:
     def __init__(self):
         self.buf = b''
 
-    def append_and_parse(self, new_bytes, n=-1):
-        """Returns a list of complete message payloads. Returns max n messages."""
+    def append_and_parse(self, new_bytes):
+        """Returns a list of complete message payloads."""
         self.buf += new_bytes
-        return self.parse(n=n)
+        return self.parse()
 
-    def parse(self, n=-1):
+    def parse(self):
         msgs = []
         while True:
             idx = self.buf.find(MSG_START)
@@ -96,7 +118,7 @@ class MessageParser:
 
             # Now we need to confirm that there isn't another starting character
             sidx = self.buf.find(MSG_START, 1)
-            if 1 < sidx < idx:
+            if 0 < sidx < idx:
                 # Yes, another start character
                 self.buf = self.buf[sidx:]
                 continue
@@ -108,45 +130,45 @@ class MessageParser:
             msg = self.buf[1:idx].decode(ENCODING, errors='ignore')
             msgs.append(msg)
             self.buf = self.buf[(idx+1):]
-            if n > 0 and len(msgs) >= n:
-                return msgs
 
 
-def blocking_read_pending_messages(sock, parser, timeout_s, n=-1):
-    """Read and return up to n messages, or None if timed out"""
-    t_start = time.perf_counter()
-    sock.settimeout(timeout_s / 2.0)
-    msgs = []
-    while (time.perf_counter() - t_start) < timeout_s:
-        try:
-            chunk = sock.read(1024) # Blocking
-        except socket.timeout:
-            pass # Handled at the while loop
+def blocking_read_messages(sock, parser, timeout_s):
+    """Read and return a non-empty list of messages.
+
+    Returns None if no complete message arrived before the deadline,
+    or if the peer closed the connection.
+
+    The deadline is enforced with select() rather than sock.settimeout(),
+    because a socket timeout is shared by the whole socket - it would also
+    apply to the write thread's sendall() on this same socket, and a short
+    leftover read timeout could make a healthy write spuriously fail. The
+    timeout on select() affects only this call in this thread. The socket
+    itself stays fully blocking.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        readable, _, _ = select.select([sock], [], [], remaining)  # Blocking
+        if not readable:
+            return None  # Deadline passed with no data
+        chunk = sock.recv(1024)  # Won't block: socket is readable (or at EOF)
         if not chunk:
-            break
-        msgs.extend(parser.append_and_parse(chunk, n))
-        if (n > 0 and len(msgs) >= n) or (n < 0 and msgs):
+            return None  # Peer closed the connection
+        msgs = parser.append_and_parse(chunk)
+        if msgs:
             return msgs
-    return None
-
-
-def blocking_read_pending_message(sock, parser, timeout_s):
-    """Read and return a single message, or None if timed out."""
-    msgs = blocking_read_pending_messages(sock, parser, timeout, 1)
-    if msgs is not None:
-        assert len(msgs) == 1
-        return msgs[0]
-    return None
 
 
 def format_msg(target: str, source: str, msg: str):
     """Adds header to our message."""
-    return ' '.join([target, from_user + ':', msg])
+    return ' '.join([target, source + ':', msg])
 
 
 def encode(s):
     """Encodes message into our byte format."""
-    s = s[:(MAX_LEN-2)]
+    s = truncate_to_encoded_length(s, MAX_LEN - 2)
     return MSG_START + s.encode(ENCODING, errors='ignore') + MSG_END
 
 
@@ -161,9 +183,6 @@ def truncate_to_encoded_length(s, n):
     return s
 
 
-class PermissionError(RuntimeError): pass
-
-
 def valid_username(s: str):
     return valid_name(s, 'user', 14)
 
@@ -173,21 +192,22 @@ def valid_roomname(s: str):
 
 
 def valid_name(s: str, nametype: str, max_encoded_len: int):
-    """Checks to see if s is valid name. Raises PermissionError with reason if unable."""
+    """Checks to see if s is valid name. Raises ChatError with reason if unable."""
     if s != s.strip():
-        raise PermissionError(f'{nametype}name has leading or trailing whitespace')
+        raise ChatError(f'{nametype}name has leading or trailing whitespace')
     if s != remove_chars(s, '/*#: \t\r\n'):
-        raise PermissionError(f'{nametype}name contains invalid characters')
+        raise ChatError(f'{nametype}name contains invalid characters')
     if s != truncate_to_encoded_length(s, max_encoded_len):
-        raise PermissionError(f'{nametype}name exceeds max encoded length ({max_encoded_len})')
+        raise ChatError(f'{nametype}name exceeds max encoded length ({max_encoded_len})')
     if len(s) < 3:
-        raise PermissionError(f'{nametype}name too short (< 3 characters)')
-    if s.lower() in {'private',
+        raise ChatError(f'{nametype}name too short (< 3 characters)')
+    if s.lower() in {DIRECT_PREFIX.lower(),
                      DEFAULT_ROOM.lower(),
-                     SERVER_USER.lower()}:
-        raise PermissionError(f'{nametype}name a controlled term - not allowed')
+                     SERVER_USER.lower(),
+                     SERVER_USER.lower().strip('*')}:
+        raise ChatError(f'{nametype}name a controlled term - not allowed')
     if not any(c.isalpha() for c in s):
-        raise PermissionError(f'{nametype}name must include at least one letter')
+        raise ChatError(f'{nametype}name must include at least one letter')
     return s
 
 
@@ -196,36 +216,46 @@ class Room:
         self.name: str = name
         self.public: bool = public
         self.creator: str = creator
-        self.admins: set[str] = {self.creator}
-        self.allowed: set[str] = set(self.admins) # Only used when public = False
-        self.banned: set[str] = set()             # Only used when public = True
-        self.present: set[str] = set(self.admins)
+        self._admins: set[str] = set()
+        self._allowed: set[str] = set() # Only used when public = False
+        self.banned: set[str] = set()   # Only used when public = True
+        self.present: set[str] = set(self.creator) # Default to creator present
+
+    @property
+    def admins(self):
+        return {self.creator} | self._admins
+
+    @property
+    def allowed(self):
+        return {self.creator} | self._allowed
 
     def kick(self, kicker: str, kickee: str):
         if kicker not in self.admins:
-            raise PermissionError(f'{kicker} not an admin - not allowed to kick {kickee}')
+            raise ChatError(f'{kicker} not an admin - not allowed to kick {kickee}')
+        if kickee == self.creator:
+            raise ChatError(f'Not allowed to kick the room creator {kickee}')
         self.present.discard(kickee)
         if self.public:
             self.banned.add(kickee)
         else:
-            self.allowed.discard(kickee)
+            self._allowed.discard(kickee)
 
     def invite(self, inviter: str, candidate: str):
         if inviter not in self.admins:
-            raise PermissionError(f'{inviter} not an admin - not allowed to invite {candidate}')
+            raise ChatError(f'{inviter} not an admin - not allowed to invite {candidate}')
         if self.public:
             if candidate in self.banned:
                 self.banned.discard(candidate)
         else:
-            self.allowed.add(candidate)
+            self._allowed.add(candidate)
 
     def join(self, user: str):
         if self.public:
             if user in self.banned:
-                raise PermissionError(f'{user} has been banned from #{self.name}')
+                raise ChatError(f'{user} has been banned from #{self.name}')
         else:
             if user not in self.allowed:
-                raise PermissionError(f'{user} does not have permission to join #{self.name}')
+                raise ChatError(f'{user} does not have permission to join #{self.name}')
         self.present.add(user)
 
     def leave(self, user: str):
@@ -233,24 +263,26 @@ class Room:
 
     def promote(self, promoter: str, candidate: str):
         if promoter != self.creator:
-            raise PermissionError(f'Only the room creator has permission to promote')
+            raise ChatError('Only the room creator has permission to promote')
         if not self.public and candidate not in self.allowed:
-            raise PermissionError(
+            raise ChatError(
                 f'{candidate} must first be allowed into #{self.name} before promotion to admin')
-        self.admins.add(candidate)
+        self._admins.add(candidate)
 
     def demote(self, demoter: str, candidate: str):
         if demoter != self.creator:
-            raise PermissionError(f'Only the room creator has permission to demote')
-        self.admins.discard(candidate)
+            raise ChatError('Only the room creator has permission to demote')
+        if candidate not in self._admins:
+            raise ChatError(f'{candidate} is not an admin, so nothing to demote')
+        self._admins.discard(candidate)
 
     def drop(self, name):
         """Remove all references to this name in this room.
 
         Does not change the creator - this should be done elsewhere.
         """
-        self.admins.discard(name)
-        self.allowed.discard(name)
+        self._admins.discard(name)
+        self._allowed.discard(name)
         self.banned.discard(name)
         self.present.discard(name)
 
@@ -274,9 +306,6 @@ class Client:
     def __repr__(self):
         return f"<{self.name or '?'} {self.peer}>"
 
-    def ready_to_accept_messages(self):
-        return self.name is not None  # This is the definition of ready
-
     def send(self, msgbytes: bytes):
         """Enqueue an already encoded message to send (assumes client threads are all running).
 
@@ -286,7 +315,6 @@ class Client:
 
     def kill_before_full_setup_with_message(self, msg):
         """Shut down the client with a message. Assumes other threads not set up yet."""
-        msg = ' '.join([DIRECT_PREFIX, SERVER_USER, msg])
         try:
             self.sock.settimeout(2.0)
             self.sock.sendall(encode(format_msg(DIRECT_PREFIX, SERVER_USER, msg)))
@@ -301,7 +329,7 @@ class Client:
             self.sock.close()
 
     def kill(self):
-        """Stop both threads associated with the client.
+        """Initiate stopping both threads associated with the client.
 
         To stop blocking reads or blocking writes, we close the socket,
         which ends blocking calls (on either thread).
@@ -347,48 +375,40 @@ class ChatServer:
     """Keep track of connected users and rooms."""
 
     def __init__(self):
-        # You MUST acquire this lock before changing information in clients or rooms
+        # You MUST acquire this lock before touching clients, rooms,
+        # or num_connected
         self.lock = threading.Lock()
-        self.clients = set() # Set of Clients
-        self.rooms = dict() # map of room name to Room
+        self.clients = {}      # map of username to Client (only fully set up clients)
+        self.num_connected = 0 # all open connections, including pre-handshake ones
+        self.rooms = dict()    # map of room name to Room
 
         self.rooms[DEFAULT_ROOM] = Room(DEFAULT_ROOM, SERVER_USER, public=True)
-
-    def get_client(self, name):
-        with self.lock:
-            for c in self.clients:
-                if c.name == name:
-                    return client
-        return None
 
     def drop_client(self, name):
         """Removes a client, and removes them from all rooms.
 
         Also removes rooms they created.
 
+        Only ever called by the client's own handler thread (see the
+        finally block in _handle_client) - that thread owns cleanup.
+
         Returns a tuple of (was dropped from client list, list of room names closed).
         """
-        was_dropped = False
         dropped_rooms = []
         with self.lock:
-            client = self.get_client(name)
-            if client is not None:
-                self.clients.discard(client)
-                was_dropped = True
+            was_dropped = self.clients.pop(name, None) is not None
 
-            for roomname, room in rooms.iter():
+            for roomname in list(self.rooms):
+                room = self.rooms[roomname]
                 if room.creator == name:
                     dropped_rooms.append(roomname)
                     del self.rooms[roomname]
                 else:
                     room.drop(name)
-            return was_dropped, dropped_rooms
+        return was_dropped, dropped_rooms
 
     def report_drop(self, name, was_dropped, dropped_rooms):
-        """Broadcast if someone left, and/or if rooms closed.
-
-        Note that is can be recursive, since broadcast can cause drops.
-        """
+        """Broadcast if someone left, and/or if rooms closed."""
         msg = ''
         if name and was_dropped:
             msg = f'{name} left.'
@@ -399,14 +419,14 @@ class ChatServer:
             self.broadcast(msg)
 
     def add_room(self, room_name, creator, public=False):
-        room_name = valid_roomname(room_name) # Raises permission error
+        room_name = valid_roomname(room_name) # Raises ChatError
         room = Room(room_name, creator, public)
         with self.lock:
             allowed = room_name not in self.rooms
             if allowed:
                 self.rooms[room_name] = room
         if not allowed:
-            raise PermissionError(f'Room {room_name} already created')
+            raise ChatError(f'Room {room_name} already created')
 
     def handle_client(self, sock, peer):
         """Handle client connection - one per client connection on own thread"""
@@ -415,21 +435,23 @@ class ChatServer:
             self._handle_client(sock, peer)
 
     def _handle_client(self, sock, peer):
+        # Make sure to disable Nagle's algorithm - makes sockets respond immediately
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
         client = Client(sock, peer)
         write_thread = threading.Thread(target=self.write_loop, args=(client,),
                                         daemon=True, name=f'send-{peer[1]}')
 
-        print(f'Got a connection from {peer}')
+        log.info(f'Got a connection from {peer}')
         with self.lock:
             # With the lock, this guarantees we will never go above the max number of clients
-            admit = len(self.clients) < MAX_CLIENTS
+            admit = self.num_connected < MAX_CLIENTS
             if admit:
-                self.clients.add(client)
-            count = len(self.clients)
+                self.num_connected += 1
         if not admit:
-            print(f'Rejecting {peer} since we are at capacity')
+            log.warning(f'Rejecting {peer} since we are at capacity')
             client.kill_before_full_setup_with_message('Server is full, try again later')
+            return
 
         try:
             # Start the writing thread (before checking username validity) to avoid
@@ -439,53 +461,57 @@ class ChatServer:
 
             # Handle the initial username retrieval
             parser = MessageParser()
-            msg = blocking_read_pending_message(sock, parser, HANDSHAKE_TIMEOUT_S)
-            if msg is None:
+            msgs = blocking_read_messages(sock, parser, HANDSHAKE_TIMEOUT_S)
+            if msgs is None:
                 client.kill_before_full_setup_with_message(f'No username received in time')
                 return
-            print(f'Checking if {msg} is a valid username')
+            log.info(f'Checking if {msgs[0]} is a valid username')
             try:
-                msg = valid_username(msg)
-            except PermissionError as e:
+                username = valid_username(msgs[0])
+            except ChatError as e:
                 client.kill_before_full_setup_with_message(str(e))
                 return
             # Check and claim username in one go
             with self.lock:
-                username_taken = any(c.name == username for c in self.clients)
+                username_taken = username in self.clients
                 if not username_taken:
                     client.name = username
+                    self.clients[username] = client
                     # Also add to the general room
                     self.rooms[DEFAULT_ROOM].present.add(username)
             if username_taken:
                 client.kill_before_full_setup_with_message(f'username {username} already in use')
                 return
-            self._server_send(client, f'Welcome {username}!')
+            self._send_private(client, f'Welcome {username}!')
             # Now that the client has a username, all of the normal messaging functions work.
             self.broadcast(f'{username} has joined')
 
+            # The client may have sent more messages right behind the username
+            for msg in msgs[1:]:
+                self.dispatch(msg, client)
+
             # Carry on with the normal read loop
             while True:
-                msgs = blocking_read_pending_message(client.sock, parser, IDLE_TIMEOUT_S)
+                msgs = blocking_read_messages(client.sock, parser, IDLE_TIMEOUT_S)
                 if msgs is None:
-                    # Read timed out. So, let this client go.
+                    # Read timed out, or client disconnected. Let this client go.
                     return
                 for msg in msgs:
                     self.dispatch(msg, client)
         except OSError as e:
-            print(f'ERROR: {client} socket error: {e}')
-        except Exception as e:
-            print(f'ERROR: {client} unhandled error: {e}')   # incl. failed start
+            log.error(f'{client} socket error: {e}')
+        except Exception:
+            log.exception(f'{client} unhandled error')   # incl. failed start
         finally:
-            username = client.username
-            if not username:
-                # Never assigned a name, just discard the client
-                with self.lock:
-                    self.clients.discard(client)
-            else:
-                was_dropped, dropped_rooms = self.drop_client(username)
-                self.report_drop(username, was_dropped, dropped_rooms)
-            print('Disconnect %r', client)
+            # The single cleanup path for this client - nobody else
+            # removes it from the shared state.
             client.kill()                # stops the sender thread
+            if client.name is not None:
+                was_dropped, dropped_rooms = self.drop_client(client.name)
+                self.report_drop(client.name, was_dropped, dropped_rooms)
+            with self.lock:
+                self.num_connected -= 1
+            log.info(f'Disconnect {client!r}')
             if write_thread.is_alive():  # False if start() never succeeded
                 # Clean up the write thread
                 write_thread.join(timeout=5.0)
@@ -512,81 +538,71 @@ class ChatServer:
         if len(msg) == 0:
             return
 
-        if msg.startswith('/'):
-            # TODO: handle command
-            cmd, payload = splitmsg(msg)
-            self.direct_send(client.name, f'Unknown command {cmd}')
-        elif msg.startswith('#'):
-            # Message to a room
-            target_room, payload = splitmsg(msg)
-            try:
-                self.broadcast(target_room, payload, client.name)
-            except PermissionError as e:
-                self._server_send(client, str(e))
-        elif msg.startswith(':'):
-            # Direct message to a user
-            target, payload = splitmsg(msg)
-            try:
-                self.direct_send(target, payload, client.name)
-            except PermissionError as e:
-                self._server_send(client, str(e))
-        else:
-            # Message to default room
-            self.broadcast(msg, client.name)
-
-    def _server_send(self, client: Client, msg: str):
-        """Send message to existing client, who may already be removed from rooms.
-
-        Silently eats queue.Full errors - use this for error responses. Does not
-        try to kill clients, so does not set off recursive chain of drop announcements.
-        """
         try:
-            client.send(encode(format_msg(DIRECT_PREFIX, SERVER_USER, msg)))
+            if msg.startswith('/'):
+                # TODO: handle commands - /help /quit /join /newroom /pubroom
+                # /invite /promote /kick /closeroom /rooms /users
+                cmd, payload = splitmsg(msg)
+                self._send_private(client, f'Unknown command {cmd}')
+            elif msg.startswith('#'):
+                # Message to a room
+                target_room, payload = splitmsg(msg)
+                self.broadcast(payload, client.name, target_room)
+            elif msg.startswith(':'):
+                # Direct message to a user
+                target, payload = splitmsg(msg)
+                self.direct_send(target, payload, client.name)
+            else:
+                # Message to default room
+                self.broadcast(msg, client.name)
+        except ChatError as e:
+            self._send_private(client, str(e))
+
+    def _send_private(self, client: Client, msg: str, from_user: str = SERVER_USER,
+                      kill_if_full: bool = False):
+        """Send a private message to a client we already have in hand (non-blocking).
+
+        The kill_if_full flag picks the policy for a full send queue:
+
+        - True: signal the client to die (their own handler thread
+          cleans up). Use for real chat messages, so a slow client
+          reconnects rather than silently missing conversation.
+        - False: quietly drop the message. Use for server replies to
+          the client's own input - those can be generated faster than
+          any client could possibly read them (e.g. error replies to a
+          flood of bad messages), so a full queue there is not the
+          client's fault and must not get them killed.
+        """
+        formatted_msg = format_msg(DIRECT_PREFIX, from_user, msg)
+        try:
+            client.send(encode(formatted_msg))
         except queue.Full:
-            pass
+            if kill_if_full:
+                log.warning(f'{client!r} send queue full - killing slow client')
+                client.kill()
+            return
+        log.info(f'[To {client.name}] {formatted_msg}') # Private message
 
     def direct_send(self, to_user: str, msg: str, from_user: str = SERVER_USER):
-        """Directly send a message to a user (non-blocking).
+        """Send a private message to a user, looked up by name (non-blocking).
 
-        Can raise permission error (TODO).
-
-        Use this instead of messaging client directly so we can manage
-        culling clients if their queue is full.
+        Raises ChatError if the user does not exist.
         """
         # Don't send message contents that are just whitespace
         if not msg.strip():
             return
 
-        formatted_msg = format_msg(DIRECT_PREFIX, from_user, msg)
-        encoded_msg = encode(formatted_msg)
-
-        drop_info = None
         with self.lock:
-            # TODO: Check send is valid
-            # raise PermissionError(f'{from_user} not allowed to post to {to_user}')
+            c = self.clients.get(to_user)
+        if c is None:
+            raise ChatError(f'No user named {to_user}')
 
-            # Send the message
-            c = self.get_client(to_user)
-            try:
-                c.send(encoded_message)
-            except queue.Full:
-                # Drop slow client
-                was_dropped, rooms_closed = self.drop_client(c.name)
-                drop_info = (c, was_dropped, rooms_closed)
-
-        print(f'[To {to_user}] {formatted_msg}') # Private message
-
-        # Actually kill client and report
-        if drop_info:
-            c, was_dropped, rooms_closed = drop_info
-            c.kill()
-            self.report_drop(c.name, was_dropped, dropped_rooms)
+        self._send_private(c, msg, from_user, kill_if_full=True)
 
     def broadcast(self, msg: str, from_user: str = SERVER_USER, roomname: str = DEFAULT_ROOM):
         """Send a message to all users in a room.
 
-        Raises permission error if room does not exist, or if user is not allowed to
-        post to room.
+        Raises ChatError if room does not exist, or if user is not in the room.
         """
         # Don't send message contents that are just whitespace
         if not msg.strip():
@@ -594,58 +610,86 @@ class ChatServer:
 
         formatted_msg = format_msg('#' + roomname, from_user, msg)
         encoded_msg = encode(formatted_msg)
-        clients_to_drop = []
-        dropped_info = []
+        slow_clients = []
         with self.lock:
-            # Check post is valid
+            # Check post is valid: you may post to any room you are
+            # allowed in, even one you have not joined (only joined
+            # users receive the message, though)
             if roomname not in self.rooms:
-                raise PermissionError(f'{roomname} is not valid room')
+                raise ChatError(f'{roomname} is not valid room')
             room = self.rooms[roomname]
-            if not room.public and from_user not in room.allowed:
-                raise PermissionError(f'{from_user} not allowed to post to {roomname}')
+            if room.public:
+                if from_user in room.banned:
+                    raise ChatError(f'{from_user} not allowed to post to {roomname}')
+            elif from_user not in room.allowed:
+                raise ChatError(f'{from_user} not allowed to post to {roomname}')
 
-            # Try posting and accumulate any clients that need to be dropped
-            for c in self.clients:
-                if c.name in room.present:
-                    try:
-                        c.send(encoded_message)
-                    except queue.Full:
-                        clients_to_drop.append(c)
+            for name in room.present:
+                c = self.clients.get(name)
+                if c is None:
+                    continue # e.g. SERVER_USER, which has no Client
+                try:
+                    c.send(encoded_msg)
+                except queue.Full:
+                    slow_clients.append(c)
 
-            # Drop clients that need to be dropped, accumulating info
-            for c in clients_to_drop:
-                was_dropped, rooms_closed = self.drop_client(c.name)
-                dropped_info.append((c.name, was_dropped, rooms_closed))
+        log.info(formatted_msg)
 
-        print(formatted_msg)
-
-        # Actually kill clients
-        for c in clients_to_drop:
+        # Signal slow clients to die (outside the lock). Each one's own
+        # handler thread does the cleanup and announcements.
+        for c in slow_clients:
+            log.warning(f'{c!r} send queue full - killing slow client')
             c.kill()
-
-        # Report cullings
-        for name, was_dropped, dropped_rooms in dropped_info:
-            self.report_drop(name, was_dropped, dropped_rooms)
 
 
 def main():
+    # We report through logging rather than print() because print() calls
+    # from different threads can interleave mid-line (clobbered output),
+    # while logging writes each line atomically. We also get a timestamp
+    # and the emitting thread's name (which we set to recv-<port> /
+    # send-<port> per client) on every line for free.
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s %(threadName)s %(levelname)s %(message)s')
+
+    # Ctrl-C sends SIGINT, which Python turns into KeyboardInterrupt for
+    # us. But `docker stop` (and most service managers) send SIGTERM
+    # instead, which by default just kills the process. Turn SIGTERM
+    # into the same KeyboardInterrupt so both shut down the same way.
+    def request_shutdown(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, request_shutdown)
+
     chat = ChatServer()
 
     # TODO: heartbeat: one thread here would walk through chat.clients
-    # and queue pings.
+    # and queue pings. Note: once that thread exists, it can also track
+    # each client's last-activity time and kill() stale clients itself
+    # (both idle clients and ones that never sent a username). That
+    # would replace the deadline logic in blocking_read_messages
+    # entirely - the reader would just block with no timeout at all.
 
     # Spawn a handler thread for each incoming connection.
     # Sets SO_REUSEADDR = 1 for you.
     with socket.create_server((HOST, PORT), backlog=BACKLOG) as srv:
-        print(f'Started DadChat v2 server on {HOST}:{PORT}')
+        log.info(f'Started DadChat v2 server on {HOST}:{PORT}')
         while True:
-            sock, peer = srv.accept()
-            threading.Thread(target=chat.handle_client, args=(sock, peer),
-                             daemon=True, name=f'recv-{peer[1]}').start()
+            try:
+                sock, peer = srv.accept()
+            except OSError:
+                # Most likely out of file descriptors during a
+                # connection flood - pause briefly instead of crashing
+                time.sleep(0.1)
+                continue
+            try:
+                threading.Thread(target=chat.handle_client, args=(sock, peer),
+                                 daemon=True, name=f'recv-{peer[1]}').start()
+            except RuntimeError:
+                # Out of threads - drop this connection instead of crashing
+                sock.close()
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print('\nShutting down')
+        log.info('Shutting down')
