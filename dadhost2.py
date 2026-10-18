@@ -72,11 +72,20 @@ IDLE_TIMEOUT_S = 15*60
 SERVER_USER = '*DadServer*'
 STOP = object()  # Unique object we use to tell a write thread to finish
 DEFAULT_ROOM = 'general'
-DIRECT_PREFIX = 'PRIVATE'
+PREFIX_DIRECT = 'PRIVATE'
+PREFIX_ERROR = 'ERROR'
+VERSION = '2.0.0' # Semantic versioning, ideally
+
+RESTRICTED_NAMES = {PREFIX_ERROR.lower(),
+                    PREFIX_DIRECT.lower(),
+                    DEFAULT_ROOM.lower(),
+                    SERVER_USER.lower(),
+                    SERVER_USER.lower().strip('*'),
+                    'dadmin', 'admin', 'root'}
 
 
 class ChatError(RuntimeError):
-    """A client request that is not allowed. """
+    """A client request that is not allowed."""
 
 
 class MessageParser:
@@ -219,10 +228,7 @@ def valid_name(s: str, nametype: str, max_encoded_len: int):
         raise ChatError(f'{nametype}name exceeds max encoded length ({max_encoded_len})')
     if len(s) < 3:
         raise ChatError(f'{nametype}name too short (< 3 characters)')
-    if s.lower() in {DIRECT_PREFIX.lower(),
-                     DEFAULT_ROOM.lower(),
-                     SERVER_USER.lower(),
-                     SERVER_USER.lower().strip('*')}:
+    if s.lower() in RESTRICTED_NAMES:
         raise ChatError(f'{nametype}name a controlled term - not allowed')
     if not any(c.isalpha() for c in s):
         raise ChatError(f'{nametype}name must include at least one letter')
@@ -335,7 +341,7 @@ class Client:
         """Shut down the client with a message. Assumes other threads not set up yet."""
         try:
             self.sock.settimeout(2.0)
-            self.sock.sendall(encode(format_msg(DIRECT_PREFIX, SERVER_USER, msg)))
+            self.sock.sendall(encode(format_msg(PREFIX_DIRECT, SERVER_USER, msg)))
             self.sock.shutdown(socket.SHUT_WR)
             # Closing with unread data in the receive buffer makes the kernel send
             # RST instead of FIN, and an RST can discard the message we just sent.
@@ -376,7 +382,7 @@ class Client:
 def splitmsg(msg):
     """Splits a message with a prefix character.
 
-    Returns the prefix word _without_ the prefix character, and the
+    Returns the prefix word with the prefix character, and the
     rest of the message after the space.
     """
     if not msg:
@@ -384,9 +390,16 @@ def splitmsg(msg):
 
     i_space = msg.find(' ')
     if i_space < 0:
-        return msg[1:], ''
+        return msg, ''
 
-    return msg[1:i_space], msg[(i_space+1):]
+    return msg[:i_space], msg[(i_space+1):]
+
+
+def plain(s):
+    """Strips off prefix character"""
+    if len(s) > 0 and s[0] in '/#:':
+        return s[1:]
+    return s
 
 
 class ChatServer:
@@ -409,11 +422,37 @@ class ChatServer:
         with self.lock:
             return list(self.clients.keys())
 
+    def _check_room(self, roomname):
+        # Call within a lock
+        if roomname not in self.rooms:
+            raise ChatError(f'No room named #{roomname}')
+
     def users_in_room(self, roomname):
         with self.lock:
-            if roomname not in self.rooms:
-                raise ChatError(f'No room named {roomname}')
+            self._check_room(roomname)
             return list(self.rooms[roomname].present)
+
+    def join_room(self, roomname, clientname):
+        with self.lock:
+            self._check_room(roomname)
+            self.rooms[roomname].join(clientname)
+
+    def room_info(self):
+        "Returns (name, admins) for all rooms"
+        with self.lock:
+            return [(name, room.admins()) for (name, room) in self.rooms.items()]
+
+    def new_room(self, roomname, creator, admits: list | None = None):
+        with self.lock:
+            if roomname in self.rooms:
+                raise ChatError(f'Room #{roomname} already exists')
+            room = Room(roomname, creator, public=False)
+            # For now, we just assume these names exist
+            if admits is None:
+                admits = []
+            for admit in admits:
+                room.invite(admit)
+            self.rooms[roomname] = room
 
     def drop_client(self, name):
         """Removes a client, and removes them from all rooms.
@@ -569,28 +608,39 @@ class ChatServer:
         if len(msg) == 0:
             return
 
+        # If no prefix character - add on the default room
+        if msg[0] not in '/:#':
+            msg = f'#{DEFAULT_ROOM} {msg}'
+
+        cmd_or_target, payload = splitmsg(msg)
         try:
             if msg.startswith('/'):
-                # TODO: handle commands - /help /quit /join /newroom /pubroom
-                # /invite /promote /kick /closeroom /rooms /users
-                cmd, payload = splitmsg(msg)
-                self.commands.handle(cmd, payload, client.name)
+                # Command
+                reply, do_quit = self.commands.handle(plain(cmd_or_target), payload, client.name)
+                if reply:
+                    # Takes care of echoing command
+                    self._send_private(client, f'{cmd_or_target} {reply}')
+                if do_quit:
+                    client.kill()
             elif msg.startswith('#'):
                 # Message to a room
-                target_room, payload = splitmsg(msg)
-                self.broadcast(payload, client.name, target_room)
+                self.broadcast(payload, client.name, plain(cmd_or_target))
             elif msg.startswith(':'):
                 # Direct message to a user
-                target, payload = splitmsg(msg)
-                self.direct_send(target, payload, client.name)
+                self.direct_send(plain(cmd_or_target), payload, client.name)
             else:
-                # Message to default room
-                self.broadcast(msg, client.name)
+                # Should not get here, but nothing to do but keep moving on
+                log.error(f'Unexpected message format: {msg}')
         except ChatError as e:
-            self._send_private(client, str(e))
+            # Takes care of adding target prefix for error
+            self._send_error(client, f'{cmd_or_target} {e}')
+
+    def _send_error(self, client: Client, msg: str, from_user: str = SERVER_USER,
+                    kill_if_full: bool = False):
+        self._send_private(client, msg, from_user, prefix=PREFIX_ERROR, kill_if_full=kill_if_full)
 
     def _send_private(self, client: Client, msg: str, from_user: str = SERVER_USER,
-                      kill_if_full: bool = False):
+                      prefix: str = PREFIX_DIRECT, kill_if_full: bool = False):
         """Send a private message to a client we already have in hand (non-blocking).
 
         The kill_if_full flag picks the policy for a full send queue:
@@ -604,7 +654,7 @@ class ChatServer:
           flood of bad messages), so a full queue there is not the
           client's fault and must not get them killed.
         """
-        formatted_msg = format_msg(DIRECT_PREFIX, from_user, msg)
+        formatted_msg = format_msg(PREFIX_DIRECT, from_user, msg)
         try:
             client.send(encode(formatted_msg))
         except queue.Full:
@@ -674,40 +724,110 @@ class ChatServer:
 
 
 class Commander:
-    """Command structure, allowing automatic help string population."""
+    """Command structure, allowing automatic help string population.
+
+    Command methods are named "cmd_xxx". If it returns.
+    """
+    QUIT_SIGNAL = object()
+
     def __init__(self, server):
         self.server = server
+
+    # TODO: handle commands - /join /newroom /pubroom
+    # /invite /promote /kick /closeroom /rooms /users
 
     def commands(self) -> list[tuple[str, str]]:
         "Returns a list of (command, helpstring) for all supported commands"
         commands = []
         # Reverse list, because dir seems to return in reverse order
-        for method in reversed(dir(self)):
+        #for method in reversed(dir(self)):
+        for method in self.__class__.__dict__:
             if method.startswith('cmd_'):
                 commands.append((method.replace('cmd_', ''),
                                  getattr(self, method).__doc__.split('\n')[0]))
         return commands
 
     def handle(self, command, payload, client_name):
+        """Handle command from client. Raises ChatError if command is unknown.
+
+        Returns (reply, do_quit), where do_quit is True if client is
+        requesting to quit gracefully.
+        """
+        # Note: command echo is handled elsewhere - just give reply
         args = payload.strip().split()
         fn_name = 'cmd_' + command
         if hasattr(self, fn_name):
-            getattr(self, fn_name)(client_name, *payload.split())
+            reply = getattr(self, fn_name)(client_name, *payload.split())
+            if isinstance(reply, tuple):
+                return reply
+            return (reply, False)
         else:
-            raise ChatError(f'Unknown command {command}')
+            raise ChatError(f'Unknown command')
 
     def cmd_help(self, client_name, *args):
         "Lists all available commands"
-        help_msg = '\n'.join([f'/{c} {h}' for c, h in self.commands()])
-        self.server.direct_send(client_name, help_msg)
+        return '\n' + '\n'.join([f'/{c} {h}' for c, h in self.commands()])
+
+    def cmd_quit(self, client_name, *args):
+        "Gracefully exit"
+        return (f'Goodbye {client_name}', True)
+
+    def cmd_echo(self, client_name, *args):
+        "Echo back any arguments (spaces are condensed)"
+        return ' '.join(args)
+
+    def cmd_version(self, client_name, *args):
+        "Returns the version of DadChat, as x.y.z"
+        return VERSION
 
     def cmd_users(self, client_name, *args):
-        "Lists all connected users; `/users #roomname` lists users in a room"
+        "Lists all connected users; `/users roomname` lists users in a room"
         if args:
             names = self.server.users_in_room(args.split()[0])
         else:
-            names = self.server.users
-        self.server.direct_send(client_name, '/users ' + ' '.join(names))
+            names = self.server.users()
+        return ' '.join(names)
+
+    def cmd_rooms(self, client_name, *args):
+        "Lists all available rooms with room admins (creator is first admin)"
+        roominfo = self.server.room_info()
+        reply = []
+        for name, admins in roominfo:
+            reply.append(f'#{name} {" ".join(admins)}')
+        return '\n' + '\n'.join(reply)
+
+    def cmd_join(self, client_name, *args):
+        "Join the specified room - immediately if allowed; otherwise reports error"
+        if len(args) < 1:
+            raise ChatError('No room specified')
+        self.server.join_room(plain(args[0]), client_name)
+        return f'You are now a member of {args[0]}'
+
+    def cmd_newroom(self, client_name, *args):
+        """Create a new private room with given name. Additional arguments are allowed users.
+
+        Leading `#` character is optional. `roomname` must be 14 bytes encoded or fewer.
+        Users listed are notified, automatically allowed into the room as non-admins, but
+        not auto-joined. You (the room creator) are auto-joined to this room.
+        """
+        if len(args) < 1:
+            raise ChatError('No room name specified')
+        roomname = plain(args[0])
+        admits = args[1:]
+        self.server.new_room(roomname, client_name, admits)
+        msg = ' '.join([f'You have been invited to join private room #{roomname} by {client_name}.'
+                        f'Type `/join #{roomname}` to join the conversation.'])
+        absent_users = []
+        for admit in admits:
+            try:
+                self.server.direct_send(admit, msg)
+            except ChatError as e:
+                absent_users.append(admit)
+        absent_summary = ''
+        if absent_users:
+            absent_summary = f'. Users not currently present: {" ".join(absent_users)}.'
+        return f'#{roomname} created{absent_summary}'
+
 
 
 def main():

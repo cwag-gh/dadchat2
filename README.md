@@ -55,7 +55,8 @@ Payloads from the server to the client are of the form:
 where:
 
 - `target_name` is either `PRIVATE`, which means the message was sent
-  directly to you from someone, or `#roomname` where `roomname` is
+  directly to you from someone, `ERROR`, which means this message is a
+  private reply AND is an error message, or `#roomname` where `roomname` is
   the name of a room
   - `#general` is the name of the main room
   - `target_name` is limited to 15 encoded bytes (meaning, room names are
@@ -140,29 +141,74 @@ the server will reply with
 
 which shows that users `zeke dadman TheBoosh` are in `#thekitchen`.
 
+Errors always come as private messages, and follow the pattern:
+
+    ERROR *DadServer*: [cmd_or_target] [errdescription]
+
+For example:
+
+    /hlp
+
+would return
+
+    ERROR *DadServer*: /hlp No such command
+
+Similarly:
+
+    :zekey What's up man?
+
+would return
+
+    ERROR *DadServer*: :zekey No such user
+
+and
+
+    #thekitchen Time to chop it up!
+
+would return
+
+    ERROR *DadServer*: #thekitchen Not a room member
+
 
 ### Commands
 
 - `/help` lists all available commands
 - `/quit` leaves the server gracefully
+- `/echo [data]` replies with the data as a private message
+- `/version` Returs a version string of the form x.y.z, where
+  increments in x represent breaking protocol level changes, y changes
+  indicate new features or regularization of existing features, and z
+  represents bugfixes
+- `/users [room]` List all users. If optional room argument is provided, lists
+  all users in that room. You must be a member of that room to list the
+  users in that room.
+- `/rooms` Lists all available rooms with room admins (creator is first admin)
 - `/join roomname` Joins a room that must exist. Leading `#` character is optional.
 - `/newroom roomname [user1] [...] [usern]` Creates a new private room with the given name.
   Leading `#` character is optional. `roomname` must be 14 bytes encoded or fewer.
   Users listed are notified, automatically allowed into the room as non-admins, but
   not auto-joined. You (the room creator) are auto-joined to this room.
+
 - `/pubroom roomname [user1] [...] [usern]` Creates a new public room. Any user can join with `/join`.
   Listed users are sent an invite request message.
-- `/join` Joins the conversation for a room. If you already allowed as part of the room,
-  you join immediately. If not, a request is sent to all of the admins of a room.
 - `/invite roomname [user1] [...] [usern]` Add users to the allowed list of the room.
   Also sends a joining request message to all users.
 - `/promote roomname [user1] [...] [usern]` Promote room member(s) to room admins of `roomname`.
   Room admins can invite and kick non-admin users to/from the room.
+- `/demote roomname [user1] [...] [usern]` Demote admin member(s) to
+  normal users of `roomname`. Only for room creators.
 - `/kick roomname [user1] [...] [usern]` As a room admin, remove non-admin user(s).
   As a room creator, remove any room member.
 - `/closeroom roomname` As the room creator, closes the room. Asks for a confirmation, so need to send
   this message twice.
-- `/rooms` Lists all available rooms, room creators, and room admins
-- `/users [room]` List all users. If optional room argument is provided, lists
-  all users in that room. You must be a member of that room to list the
-  users in that room.
+
+
+
+
+
+## TODO
+
+- Limit the number of rooms a user can create
+- Limit the number of messages a user can send
+- Block messages from a user
+- How to send responses that are long (history, number of users, help)
