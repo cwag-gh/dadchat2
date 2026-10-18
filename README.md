@@ -128,6 +128,19 @@ is a message to the room `#thekitchen`. This will only broadcast to
 is a command message, in this case asking to list
 all available commands.
 
+Note that when the server replies to a command, it will always do
+so with the command echoed, so that you know this is a response
+to your command. For example, if you send:
+
+    /users #thekitchen
+
+the server will reply with
+
+    PRIVATE *DadServer*: /users zeke dadman TheBoosh
+
+which shows that users `zeke dadman TheBoosh` are in `#thekitchen`.
+
+
 ### Commands
 
 - `/help` lists all available commands
