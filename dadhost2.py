@@ -400,7 +400,20 @@ class ChatServer:
         self.num_connected = 0 # all open connections, including pre-handshake ones
         self.rooms = dict()    # map of room name to Room
 
+        self.commands = Commander(self)
+
         self.rooms[DEFAULT_ROOM] = Room(DEFAULT_ROOM, SERVER_USER, public=True)
+
+    def users(self):
+        """Returns a list of connected users."""
+        with self.lock:
+            return list(self.clients.keys())
+
+    def users_in_room(self, roomname):
+        with self.lock:
+            if roomname not in self.rooms:
+                raise ChatError(f'No room named {roomname}')
+            return list(self.rooms[roomname].present)
 
     def drop_client(self, name):
         """Removes a client, and removes them from all rooms.
@@ -561,7 +574,7 @@ class ChatServer:
                 # TODO: handle commands - /help /quit /join /newroom /pubroom
                 # /invite /promote /kick /closeroom /rooms /users
                 cmd, payload = splitmsg(msg)
-                self._send_private(client, f'Unknown command {cmd}')
+                self.commands.handle(cmd, payload, client.name)
             elif msg.startswith('#'):
                 # Message to a room
                 target_room, payload = splitmsg(msg)
@@ -658,6 +671,43 @@ class ChatServer:
         for c in slow_clients:
             log.warning(f'{c!r} send queue full - killing slow client')
             c.kill()
+
+
+class Commander:
+    """Command structure, allowing automatic help string population."""
+    def __init__(self, server):
+        self.server = server
+
+    def commands(self) -> list[tuple[str, str]]:
+        "Returns a list of (command, helpstring) for all supported commands"
+        commands = []
+        # Reverse list, because dir seems to return in reverse order
+        for method in reversed(dir(self)):
+            if method.startswith('cmd_'):
+                commands.append((method.replace('cmd_', ''),
+                                 getattr(self, method).__doc__.split('\n')[0]))
+        return commands
+
+    def handle(self, command, payload, client_name):
+        args = payload.strip().split()
+        fn_name = 'cmd_' + command
+        if hasattr(self, fn_name):
+            getattr(self, fn_name)(client_name, *payload.split())
+        else:
+            raise ChatError(f'Unknown command {command}')
+
+    def cmd_help(self, client_name, *args):
+        "Lists all available commands"
+        help_msg = '\n'.join([f'/{c} {h}' for c, h in self.commands()])
+        self.server.direct_send(client_name, help_msg)
+
+    def cmd_users(self, client_name, *args):
+        "Lists all connected users; `/users #roomname` lists users in a room"
+        if args:
+            names = self.server.users_in_room(args.split()[0])
+        else:
+            names = self.server.users
+        self.server.direct_send(client_name, '/users ' + ' '.join(names))
 
 
 def main():
