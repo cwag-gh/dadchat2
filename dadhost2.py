@@ -161,6 +161,24 @@ def blocking_read_messages(sock, parser, timeout_s):
             return msgs
 
 
+def connect_to_server(host):
+    """Resolve host and connect to the chat server on it (for clients).
+
+    We ask for an IPv4 address explicitly. The default lookup asks for
+    IPv4 and IPv6 together, and on .local (mDNS/Bonjour) hostnames that
+    can stall for ~5 seconds per connect when the target host answers
+    the IPv4 question but never answers the IPv6 one (measured against
+    a macOS -> Unraid/avahi setup). If there is no IPv4 address at all,
+    fall back to the default lookup.
+    """
+    try:
+        infos = socket.getaddrinfo(host, PORT, family=socket.AF_INET,
+                                   type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        infos = socket.getaddrinfo(host, PORT, type=socket.SOCK_STREAM)
+    return socket.create_connection(infos[0][4])
+
+
 def format_msg(target: str, source: str, msg: str):
     """Adds header to our message."""
     return ' '.join([target, source + ':', msg])
