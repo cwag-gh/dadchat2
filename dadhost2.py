@@ -239,7 +239,7 @@ class Room:
         self._admins: set[str] = set()
         self._allowed: set[str] = set() # Only used when public = False
         self.banned: set[str] = set()   # Only used when public = True
-        self.present: set[str] = set(self.creator) # Default to creator present
+        self.present: set[str] = {self.creator} # Default to creator present
 
     @property
     def admins(self):
@@ -436,7 +436,7 @@ class ChatServer:
     def room_info(self):
         "Returns (name, admins) for all rooms"
         with self.lock:
-            return [(name, room.admins()) for (name, room) in self.rooms.items()]
+            return [(name, room.admins) for (name, room) in self.rooms.items()]
 
     def new_room(self, roomname, creator, admits: list | None = None, public=False):
         roomname = valid_roomname(roomname) # Raises ChatError
@@ -771,7 +771,7 @@ class Commander:
     def cmd_users(self, client_name, *args):
         "Lists all connected users; `/users roomname` lists users in a room"
         if args:
-            names = self.server.users_in_room(args.split()[0])
+            names = self.server.users_in_room(plain(args[0]))
         else:
             names = self.server.users()
         return ' '.join(names)
@@ -796,9 +796,9 @@ class Commander:
             raise ChatError('No room name specified')
         roomname = plain(args[0])
         admits = args[1:]
-        self.server.new_room(roomname, client_name, admits, public=False)
+        self.server.new_room(roomname, client_name, admits, public=public)
         rmtype = 'public' if public else 'private'
-        msg = ' '.join([f'You have been invited to join {rmtype} room #{roomname} by {client_name}.'
+        msg = ' '.join([f'You have been invited to join {rmtype} room #{roomname} by {client_name}.',
                         f'Type `/join #{roomname}` to join the conversation.'])
         absent_users = []
         for admit in admits:
