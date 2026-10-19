@@ -684,7 +684,7 @@ class ChatServer:
             # allowed in, even one you have not joined (only joined
             # users receive the message, though)
             if roomname not in self.rooms:
-                raise ChatError(f'{roomname} is not valid room')
+                raise ChatError(f'is not a valid room') # Room name is prefixed
             room = self.rooms[roomname]
             if room.public:
                 if from_user in room.banned:
