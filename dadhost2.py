@@ -641,7 +641,7 @@ class ChatServer:
           flood of bad messages), so a full queue there is not the
           client's fault and must not get them killed.
         """
-        formatted_msg = format_msg(PREFIX_DIRECT, from_user, msg)
+        formatted_msg = format_msg(prefix, from_user, msg)
         try:
             client.send(encode(formatted_msg))
         except queue.Full:
