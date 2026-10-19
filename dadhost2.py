@@ -70,7 +70,7 @@ STOP = object()  # Unique object we use to tell a write thread to finish
 DEFAULT_ROOM = 'general'
 PREFIX_DIRECT = 'PRIVATE'
 PREFIX_ERROR = 'ERROR'
-VERSION = '2.0.3' # Semantic versioning, ideally
+VERSION = '2.0.4' # Semantic versioning, ideally
 
 RESTRICTED_NAMES = {PREFIX_ERROR.lower(),
                     PREFIX_DIRECT.lower(),
@@ -374,6 +374,18 @@ class Client:
             # Full queue means the write thread will see the dead socket on its own
             pass
 
+    def quit(self):
+        """Gracefully stop the client: send every message already queued, then hang up.
+
+        Unlike kill(), this does not close the socket right away. The write
+        thread hangs up (by calling kill()) once it reaches the STOP message.
+        """
+        try:
+            self.messages_to_send.put_nowait(STOP)
+        except queue.Full:
+            # No room to wait our turn, so hang up right away
+            self.kill()
+
 
 def splitmsg(msg):
     """Splits a message with a prefix character.
@@ -585,8 +597,10 @@ class ChatServer:
                     return
                 client.sock.sendall(frame)
         except OSError:
-            # Peer is gone. Break the reader too, so its thread stops waiting
-            # for the idle timeout while this queue silently fills.
+            pass  # Peer is gone
+        finally:
+            # Break the reader too: after a quit(), or if the peer is gone
+            # (so the reader isn't left waiting for the idle timeout).
             client.kill()
 
     def dispatch(self, msg, client):
@@ -608,7 +622,7 @@ class ChatServer:
                     # Takes care of echoing command
                     self._send_private(client, f'{cmd_or_target} {reply}')
                 if do_quit:
-                    client.kill()
+                    client.quit()  # Let the reply above get sent first
             elif msg.startswith('#'):
                 # Message to a room
                 self.broadcast(payload, client.name, plain(cmd_or_target))
