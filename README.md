@@ -40,7 +40,7 @@ following are true:
 - It is at least 3 characters long
 - It includes at least one letter
 - username.lower() is not any of the following reserved words:
-  `private`, `general`, `dadserver`
+  `private`, `general`, `dadserver`, `admin`, `dadmin`, `root`
 
 If the first message is not a valid username, the server will send an
 error message then close the connection.
