@@ -74,7 +74,7 @@ STOP = object()  # Unique object we use to tell a write thread to finish
 DEFAULT_ROOM = 'general'
 PREFIX_DIRECT = 'PRIVATE'
 PREFIX_ERROR = 'ERROR'
-VERSION = '2.0.0' # Semantic versioning, ideally
+VERSION = '2.0.1' # Semantic versioning, ideally
 
 RESTRICTED_NAMES = {PREFIX_ERROR.lower(),
                     PREFIX_DIRECT.lower(),
@@ -451,7 +451,7 @@ class ChatServer:
             if admits is None:
                 admits = []
             for admit in admits:
-                room.invite(admit)
+                room.invite(creator, admit)
             self.rooms[roomname] = room
 
     def drop_client(self, name):
