@@ -713,7 +713,11 @@ class ChatServer:
 class Commander:
     """Command structure, allowing automatic help string population.
 
-    Command methods are named "cmd_xxx". If it returns.
+    Command methods are named "cmd_xxx". They return a tuple
+    (reply_msg, quit), where reply_msg is sent back to the caller, and
+    the quit flag is set if the command should gracefully exit the
+    client. Optionally, the command functions can return just reply_msg,
+    and quit is assumed False.
     """
     QUIT_SIGNAL = object()
 
