@@ -438,11 +438,12 @@ class ChatServer:
         with self.lock:
             return [(name, room.admins()) for (name, room) in self.rooms.items()]
 
-    def new_room(self, roomname, creator, admits: list | None = None):
+    def new_room(self, roomname, creator, admits: list | None = None, public=False):
+        roomname = valid_roomname(roomname) # Raises ChatError
         with self.lock:
             if roomname in self.rooms:
                 raise ChatError(f'Room #{roomname} already exists')
-            room = Room(roomname, creator, public=False)
+            room = Room(roomname, creator, public=public)
             # For now, we just assume these names exist
             if admits is None:
                 admits = []
@@ -483,16 +484,6 @@ class ChatServer:
         msg = msg.strip()
         if msg:
             self.broadcast(msg)
-
-    def add_room(self, room_name, creator, public=False):
-        room_name = valid_roomname(room_name) # Raises ChatError
-        room = Room(room_name, creator, public)
-        with self.lock:
-            allowed = room_name not in self.rooms
-            if allowed:
-                self.rooms[room_name] = room
-        if not allowed:
-            raise ChatError(f'Room {room_name} already created')
 
     def handle_client(self, sock, peer):
         """Handle client connection - one per client connection on own thread"""
