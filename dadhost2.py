@@ -852,7 +852,7 @@ def main():
     # Spawn a handler thread for each incoming connection.
     # Sets SO_REUSEADDR = 1 for you.
     with socket.create_server((HOST, PORT), backlog=BACKLOG) as srv:
-        log.info(f'Started DadChat v2 server on {HOST}:{PORT}')
+        log.info(f'Started DadChat v{VERSION} server on {HOST}:{PORT}')
         while True:
             try:
                 sock, peer = srv.accept()
