@@ -70,7 +70,7 @@ STOP = object()  # Unique object we use to tell a write thread to finish
 DEFAULT_ROOM = 'general'
 PREFIX_DIRECT = 'PRIVATE'
 PREFIX_ERROR = 'ERROR'
-VERSION = '2.0.2' # Semantic versioning, ideally
+VERSION = '2.0.3' # Semantic versioning, ideally
 
 RESTRICTED_NAMES = {PREFIX_ERROR.lower(),
                     PREFIX_DIRECT.lower(),
