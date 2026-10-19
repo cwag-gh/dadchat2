@@ -43,10 +43,6 @@
 #   closes the socket; the owner thread then wakes up and cleans
 #   up. This avoids tricky lock-ordering problems (deadlocks) and
 #   recursive announcements.
-#
-# TODO:
-# - add ping/pong keepalive
-# - add message rate limiting
 
 import logging
 import threading
@@ -732,9 +728,6 @@ class Commander:
 
     def __init__(self, server):
         self.server = server
-
-    # TODO: handle commands - /join /newroom /pubroom
-    # /invite /promote /kick /closeroom /rooms /users
 
     def commands(self) -> list[tuple[str, str]]:
         "Returns a list of (command, helpstring) for all supported commands"

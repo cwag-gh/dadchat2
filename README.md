@@ -188,9 +188,11 @@ would return
   Leading `#` character is optional. `roomname` must be 14 bytes encoded or fewer.
   Users listed are notified, automatically allowed into the room as non-admins, but
   not auto-joined. You (the room creator) are auto-joined to this room.
-
 - `/pubroom roomname [user1] [...] [usern]` Creates a new public room. Any user can join with `/join`.
   Listed users are sent an invite request message.
+
+#### Commands remaining
+
 - `/invite roomname [user1] [...] [usern]` Add users to the allowed list of the room.
   Also sends a joining request message to all users.
 - `/promote roomname [user1] [...] [usern]` Promote room member(s) to room admins of `roomname`.
@@ -203,12 +205,11 @@ would return
   this message twice.
 
 
-
-
-
 ## TODO
 
 - Limit the number of rooms a user can create
-- Limit the number of messages a user can send
+- Limit the number of messages a user can send (per unit time)
 - Block messages from a user
 - How to send responses that are long (history, number of users, help)
+- Timestamps
+- Add ping/pong keepalive
