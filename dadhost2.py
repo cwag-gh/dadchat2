@@ -787,19 +787,14 @@ class Commander:
         self.server.join_room(plain(args[0]), client_name)
         return f'You are now a member of {args[0]}'
 
-    def cmd_newroom(self, client_name, *args):
-        """Create a new private room with given name. Additional arguments are allowed users.
-
-        Leading `#` character is optional. `roomname` must be 14 bytes encoded or fewer.
-        Users listed are notified, automatically allowed into the room as non-admins, but
-        not auto-joined. You (the room creator) are auto-joined to this room.
-        """
+    def _create_room(self, client_name, args, public):
         if len(args) < 1:
             raise ChatError('No room name specified')
         roomname = plain(args[0])
         admits = args[1:]
-        self.server.new_room(roomname, client_name, admits)
-        msg = ' '.join([f'You have been invited to join private room #{roomname} by {client_name}.'
+        self.server.new_room(roomname, client_name, admits, public=False)
+        rmtype = 'public' if public else 'private'
+        msg = ' '.join([f'You have been invited to join {rmtype} room #{roomname} by {client_name}.'
                         f'Type `/join #{roomname}` to join the conversation.'])
         absent_users = []
         for admit in admits:
@@ -810,8 +805,21 @@ class Commander:
         absent_summary = ''
         if absent_users:
             absent_summary = f'. Users not currently present: {" ".join(absent_users)}.'
-        return f'#{roomname} created{absent_summary}'
+        return f'#{roomname} created and joined{absent_summary}'
 
+    def cmd_newroom(self, client_name, *args):
+        """Create a new private room with given name. Additional arguments are allowed users.
+
+        Leading `#` character is optional. `roomname` must be 14 bytes encoded or fewer.
+        Users listed are notified, automatically allowed into the room as non-admins, but
+        not auto-joined. You (the room creator) are auto-joined to this room.
+        """
+        return self._create_room(client_name, args, public=False)
+
+    def cmd_pubroom(self, client_name, *args):
+        """Create a new public room with given name. Additional arguments are notified users.
+        """
+        return self._create_room(client_name, args, public=True)
 
 
 def main():
