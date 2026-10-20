@@ -71,7 +71,7 @@ STOP = object()  # Unique object we use to tell a write thread to finish
 DEFAULT_ROOM = 'general'
 PREFIX_DIRECT = 'PRIVATE'
 PREFIX_ERROR = 'ERROR'
-VERSION = '2.0.5' # Semantic versioning, ideally
+VERSION = '2.0.6' # Semantic versioning, ideally
 
 RESTRICTED_NAMES = {PREFIX_ERROR.lower(),
                     PREFIX_DIRECT.lower(),
@@ -496,9 +496,9 @@ class ChatServer:
             return list(room.present)
 
     def room_info(self):
-        "Returns (name, admins) for all rooms, with the creator as the first admin"
+        "Returns (name, creator, other admins) for all rooms"
         with self.lock:
-            return [(name, [room.creator] + sorted(room.admins - {room.creator}))
+            return [(name, room.creator, sorted(room.admins - {room.creator}))
                     for (name, room) in self.rooms.items()]
 
     def new_room(self, roomname, creator, public=False):
@@ -836,12 +836,12 @@ class Commander:
         return ' '.join(names)
 
     def cmd_rooms(self, client_name, *args):
-        "Lists all available rooms with room admins (creator is first admin)"
-        roominfo = self.server.room_info()
-        reply = []
-        for name, admins in roominfo:
-            reply.append(f'#{name} {" ".join(admins)}')
-        return '\n' + '\n'.join(reply)
+        "Lists all available rooms with room admins (creator in parentheses)"
+        # Start each line with a dash, since a line starting with "#room"
+        # looks like a message sent to that room
+        rooms = [' '.join([f'- #{name} ({creator})'] + admins)
+                 for name, creator, admins in self.server.room_info()]
+        return '\n' + '\n'.join(rooms)
 
     def cmd_join(self, client_name, *args):
         "Join the specified room - immediately if allowed; otherwise reports error"

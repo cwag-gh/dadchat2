@@ -182,7 +182,9 @@ would return
 - `/users [room]` List all users. If optional room argument is provided, lists
   all users in that room. You must be a member of that room to list the
   users in that room.
-- `/rooms` Lists all available rooms with room admins (creator is first admin)
+- `/rooms` Lists all available rooms with room admins (creator in parentheses), one room per
+  line. Each line starts with a dash, e.g. `- #ManCave (dad) Tommy`, so it can't be mistaken for
+  a message sent to that room.
 - `/join roomname` Joins a room that must exist. Leading `#` character is optional.
 - `/newroom roomname [user1] [...] [usern]` Creates a new private room with the given name.
   Leading `#` character is optional. `roomname` must be 14 bytes encoded or fewer.

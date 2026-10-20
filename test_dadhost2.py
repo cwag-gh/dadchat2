@@ -187,9 +187,10 @@ class TestChatServer(unittest.TestCase):
             ('/pubroom park',        'PRIVATE *DadServer*: /pubroom #park created and joined'),
             ('/users #kitchen',      'PRIVATE *DadServer*: /users alice'),
             ('/join #park',          'PRIVATE *DadServer*: /join You are now a member of #park'),
-            ('/rooms',               'PRIVATE *DadServer*: /rooms \n#general *DadServer*\n#kitchen alice\n#park alice'),
+            ('/rooms',               'PRIVATE *DadServer*: /rooms \n- #general (*DadServer*)\n- #kitchen (alice)\n- #park (alice)'),
             ('/invite kitchen bob',  'PRIVATE *DadServer*: /invite bob has been invited to join #kitchen'),
             ('/promote kitchen bob', 'PRIVATE *DadServer*: /promote bob has been promoted to admin of #kitchen'),
+            ('/rooms',               'PRIVATE *DadServer*: /rooms \n- #general (*DadServer*)\n- #kitchen (alice) bob\n- #park (alice)'),
             ('/demote kitchen bob',  'PRIVATE *DadServer*: /demote bob has been demoted to a normal user of #kitchen'),
             ('/kick kitchen bob',    'PRIVATE *DadServer*: /kick bob has been kicked from #kitchen'),
             ('/kick kitchen alice',  'ERROR *DadServer*: /kick Not allowed to kick the room creator alice'),
@@ -203,6 +204,12 @@ class TestChatServer(unittest.TestCase):
             self.assertEqual(self.alice.receive(), reply)
 
         self.assertIsNone(self.alice.receive())  # After /quit, the server hangs up
+
+    def test_rooms_reply_does_not_look_like_a_room_message(self):
+        # Regression test: /rooms used to put each room on its own line, like
+        # "#general *DadServer*", which looked just like a message sent to #general
+        self.alice.send('/rooms')
+        self.assertNotIn('\n#', self.alice.receive())
 
     def test_room_message(self):
         self.alice.send('Hi all!')  # No target means #general
