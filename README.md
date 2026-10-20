@@ -190,19 +190,21 @@ would return
   not auto-joined. You (the room creator) are auto-joined to this room.
 - `/pubroom roomname [user1] [...] [usern]` Creates a new public room. Any user can join with `/join`.
   Listed users are sent an invite request message.
-
-#### Commands remaining
-
-- `/invite roomname [user1] [...] [usern]` Add users to the allowed list of the room.
-  Also sends a joining request message to all users.
-- `/promote roomname [user1] [...] [usern]` Promote room member(s) to room admins of `roomname`.
-  Room admins can invite and kick non-admin users to/from the room.
-- `/demote roomname [user1] [...] [usern]` Demote admin member(s) to
+- `/invite roomname user1 [...] [usern]` As a room admin, add users to the allowed list of a
+  private room (or lift their ban from a public room). Also sends them an invite request message.
+- `/promote roomname user1 [...] [usern]` Promote room member(s) to room admins of `roomname`.
+  Only for room creators. Room admins can invite and kick non-admin users to/from the room.
+- `/demote roomname user1 [...] [usern]` Demote admin member(s) to
   normal users of `roomname`. Only for room creators.
-- `/kick roomname [user1] [...] [usern]` As a room admin, remove non-admin user(s).
-  As a room creator, remove any room member.
+- `/kick roomname user1 [...] [usern]` As a room admin, remove non-admin user(s).
+  As a room creator, remove any room member. A kicked admin also loses their admin status.
+  Users kicked from a public room are banned from it until invited back.
 - `/closeroom roomname` As the room creator, closes the room. Asks for a confirmation, so need to send
-  this message twice.
+  this message twice within 60 seconds. Everyone in the room is told it closed.
+
+For the commands that take a list of users, each user is handled separately: the reply
+says what happened for each user it worked for (e.g. `bob has been kicked from #kitchen`),
+plus an error for each one it did not.
 
 
 ## TODO

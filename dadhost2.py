@@ -65,12 +65,13 @@ BACKLOG = 32
 MAX_CLIENTS = 32
 HANDSHAKE_TIMEOUT_S = 10
 IDLE_TIMEOUT_S = 15*60
+CLOSE_CONFIRM_S = 60  # A room creator must ask twice within this time to close a room
 SERVER_USER = '*DadServer*'
 STOP = object()  # Unique object we use to tell a write thread to finish
 DEFAULT_ROOM = 'general'
 PREFIX_DIRECT = 'PRIVATE'
 PREFIX_ERROR = 'ERROR'
-VERSION = '2.0.4' # Semantic versioning, ideally
+VERSION = '2.0.5' # Semantic versioning, ideally
 
 RESTRICTED_NAMES = {PREFIX_ERROR.lower(),
                     PREFIX_DIRECT.lower(),
@@ -240,6 +241,7 @@ class Room:
         self._allowed: set[str] = set() # Only used when public = False
         self.banned: set[str] = set()   # Only used when public = True
         self.present: set[str] = {self.creator} # Default to creator present
+        self.close_requested_at: float | None = None  # When the creator last asked to close
 
     @property
     def admins(self):
@@ -254,6 +256,9 @@ class Room:
             raise ChatError(f'{kicker} not an admin - not allowed to kick {kickee}')
         if kickee == self.creator:
             raise ChatError(f'Not allowed to kick the room creator {kickee}')
+        if kickee in self.admins and kicker != self.creator:
+            raise ChatError(f'Only the room creator has permission to kick admin {kickee}')
+        self._admins.discard(kickee)  # Being kicked also takes away admin status
         self.present.discard(kickee)
         if self.public:
             self.banned.add(kickee)
@@ -295,6 +300,20 @@ class Room:
         if candidate not in self._admins:
             raise ChatError(f'{candidate} is not an admin, so nothing to demote')
         self._admins.discard(candidate)
+
+    def request_close(self, closer: str, now: float):
+        """Returns True if the room should close now.
+
+        To be sure, the creator has to ask twice within CLOSE_CONFIRM_S
+        seconds. `now` is the current time in seconds (passed in, so tests
+        don't have to wait a minute).
+        """
+        if closer != self.creator:
+            raise ChatError('Only the room creator has permission to close the room')
+        asked_recently = (self.close_requested_at is not None
+                          and now - self.close_requested_at <= CLOSE_CONFIRM_S)
+        self.close_requested_at = now
+        return asked_recently
 
     def drop(self, name):
         """Remove all references to this name in this room.
@@ -430,38 +449,64 @@ class ChatServer:
         with self.lock:
             return list(self.clients.keys())
 
-    def _check_room(self, roomname):
+    def _get_room(self, roomname):
         # Call within a lock
         if roomname not in self.rooms:
             raise ChatError(f'No room named #{roomname}')
+        return self.rooms[roomname]
 
     def users_in_room(self, roomname):
         with self.lock:
-            self._check_room(roomname)
-            return list(self.rooms[roomname].present)
+            return list(self._get_room(roomname).present)
 
     def join_room(self, roomname, clientname):
         with self.lock:
-            self._check_room(roomname)
-            self.rooms[roomname].join(clientname)
+            self._get_room(roomname).join(clientname)
+
+    def apply_to_each_user(self, roomname, action, actor, users):
+        """Do a room action ('invite', 'promote', 'demote' or 'kick') to each user.
+
+        For example, apply_to_each_user('kitchen', 'kick', 'alice', ['bob', 'carol'])
+        calls room.kick('alice', 'bob'), then room.kick('alice', 'carol').
+        Each user is tried separately, so one user that fails does not stop the rest.
+
+        Returns (list of users it worked for, list of error messages).
+        """
+        succeeded, errors = [], []
+        with self.lock:
+            room = self._get_room(roomname)
+            for user in users:
+                try:
+                    getattr(room, action)(actor, user)
+                    succeeded.append(user)
+                except ChatError as e:
+                    errors.append(str(e))
+        return succeeded, errors
+
+    def close_room(self, roomname, closer):
+        """Close a room (the creator has to ask twice within CLOSE_CONFIRM_S, to be sure).
+
+        Returns the users who were in the room, or None if this was only the first ask.
+        """
+        with self.lock:
+            room = self._get_room(roomname)
+            if not room.request_close(closer, time.monotonic()):
+                return None
+            del self.rooms[roomname]
+            return list(room.present)
 
     def room_info(self):
-        "Returns (name, admins) for all rooms"
+        "Returns (name, admins) for all rooms, with the creator as the first admin"
         with self.lock:
-            return [(name, room.admins) for (name, room) in self.rooms.items()]
+            return [(name, [room.creator] + sorted(room.admins - {room.creator}))
+                    for (name, room) in self.rooms.items()]
 
-    def new_room(self, roomname, creator, admits: list | None = None, public=False):
+    def new_room(self, roomname, creator, public=False):
         roomname = valid_roomname(roomname) # Raises ChatError
         with self.lock:
             if roomname in self.rooms:
                 raise ChatError(f'Room #{roomname} already exists')
-            room = Room(roomname, creator, public=public)
-            # For now, we just assume these names exist
-            if admits is None:
-                admits = []
-            for admit in admits:
-                room.invite(creator, admit)
-            self.rooms[roomname] = room
+            self.rooms[roomname] = Room(roomname, creator, public=public)
 
     def drop_client(self, name):
         """Removes a client, and removes them from all rooms.
@@ -756,10 +801,10 @@ class Commander:
         requesting to quit gracefully.
         """
         # Note: command echo is handled elsewhere - just give reply
-        args = payload.strip().split()
+        args = payload.split()
         fn_name = 'cmd_' + command
         if hasattr(self, fn_name):
-            reply = getattr(self, fn_name)(client_name, *payload.split())
+            reply = getattr(self, fn_name)(client_name, *args)
             if isinstance(reply, tuple):
                 return reply
             return (reply, False)
@@ -805,25 +850,26 @@ class Commander:
         self.server.join_room(plain(args[0]), client_name)
         return f'You are now a member of {args[0]}'
 
+    def _notify(self, users, msg):
+        """Privately send msg to each user. Returns the users who are not connected."""
+        absent_users = []
+        for user in users:
+            try:
+                self.server.direct_send(user, msg)
+            except ChatError:
+                absent_users.append(user)
+        return absent_users
+
     def _create_room(self, client_name, args, public):
         if len(args) < 1:
             raise ChatError('No room name specified')
         roomname = plain(args[0])
-        admits = args[1:]
-        self.server.new_room(roomname, client_name, admits, public=public)
-        rmtype = 'public' if public else 'private'
-        msg = ' '.join([f'You have been invited to join {rmtype} room #{roomname} by {client_name}.',
-                        f'Type `/join #{roomname}` to join the conversation.'])
-        absent_users = []
-        for admit in admits:
-            try:
-                self.server.direct_send(admit, msg)
-            except ChatError as e:
-                absent_users.append(admit)
-        absent_summary = ''
-        if absent_users:
-            absent_summary = f'. Users not currently present: {" ".join(absent_users)}.'
-        return f'#{roomname} created and joined{absent_summary}'
+        self.server.new_room(roomname, client_name, public=public)
+        reply = f'#{roomname} created and joined'
+        if len(args) > 1:
+            # Any users listed after the room name get invited
+            reply += '. ' + self.cmd_invite(client_name, *args)
+        return reply
 
     def cmd_newroom(self, client_name, *args):
         """Create a new private room with given name. Additional arguments are allowed users.
@@ -838,6 +884,78 @@ class Commander:
         """Create a new public room with given name. Additional arguments are notified users.
         """
         return self._create_room(client_name, args, public=True)
+
+    def _apply_to_each_user(self, client_name, args, action, done):
+        """Shared by /invite, /promote, /demote and /kick, which all take
+        `roomname user1 [...] [usern]` and do the room action to each user.
+
+        `done` says what happened, e.g. 'kicked from'. Each user it worked
+        for is told "You have been kicked from #kitchen by alice.", and the
+        reply says "bob has been kicked from #kitchen". Some users can fail
+        while others succeed (e.g., an admin can kick users, but not other
+        admins), so the reply also has an error for each user it did not
+        work for.
+        """
+        if len(args) < 2:
+            raise ChatError('Need a room name and at least one user')
+        roomname, users = plain(args[0]), args[1:]
+        succeeded, errors = self.server.apply_to_each_user(roomname, action, client_name, users)
+        if not succeeded:
+            raise ChatError('. '.join(errors))
+        absent_users = self._notify(succeeded, f'You have been {done} #{roomname} by {client_name}.')
+        reply = '. '.join([f'{user} has been {done} #{roomname}' for user in succeeded] + errors)
+        if absent_users:
+            reply += f'. Users not currently present: {" ".join(absent_users)}.'
+        return reply
+
+    def cmd_invite(self, client_name, *args):
+        """Invite users to a room (room admins only)
+
+        `/invite roomname user1 [...] [usern]`. In a private room, this adds
+        the users to the allowed list. In a public room, it lifts any ban.
+        """
+        return self._apply_to_each_user(client_name, args, 'invite', 'invited to join')
+
+    def cmd_promote(self, client_name, *args):
+        """Make users room admins (room creator only)
+
+        `/promote roomname user1 [...] [usern]`. Room admins can invite
+        users, and kick users who are not admins.
+        """
+        return self._apply_to_each_user(client_name, args, 'promote', 'promoted to admin of')
+
+    def cmd_demote(self, client_name, *args):
+        """Make room admins normal users again (room creator only)
+
+        `/demote roomname user1 [...] [usern]`
+        """
+        return self._apply_to_each_user(client_name, args, 'demote', 'demoted to a normal user of')
+
+    def cmd_kick(self, client_name, *args):
+        """Remove users from a room (room admins only)
+
+        `/kick roomname user1 [...] [usern]`. Only the room creator can kick
+        an admin, which also takes away their admin status. Users kicked
+        from a public room are banned from it until invited back.
+        """
+        return self._apply_to_each_user(client_name, args, 'kick', 'kicked from')
+
+    def cmd_closeroom(self, client_name, *args):
+        """Close a room you created (send twice, to be sure)
+
+        `/closeroom roomname`. The second request has to come within
+        CLOSE_CONFIRM_S seconds of the first. Everyone in the room is told it closed.
+        """
+        if len(args) < 1:
+            raise ChatError('No room specified')
+        roomname = plain(args[0])
+        members = self.server.close_room(roomname, client_name)
+        if members is None:
+            return (f'Are you sure? Send `/closeroom #{roomname}` again within '
+                    f'{CLOSE_CONFIRM_S} seconds to close it')
+        others = [m for m in members if m != client_name]
+        self._notify(others, f'#{roomname} was closed by {client_name}.')
+        return f'#{roomname} closed'
 
 
 def main():
